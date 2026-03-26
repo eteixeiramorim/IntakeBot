@@ -9,6 +9,26 @@ import {
 } from "discord.js";
 import fs from "fs";
 import path from "path";
+import http from "http";
+
+// ==============================
+// SERVIDOR HTTP PARA O RENDER
+// ==============================
+
+const PORT = process.env.PORT || 10000;
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("IntakeBot online");
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌐 Web service ativo na porta ${PORT}`);
+});
+
+// ==============================
+// CLIENT DISCORD
+// ==============================
 
 const client = new Client({
   intents: [
@@ -70,11 +90,11 @@ function formatDate(iso) {
 
 function loadHistory() {
   if (!fs.existsSync(HISTORY_FILE)) return {};
-  return JSON.parse(fs.readFileSync(HISTORY_FILE));
+  return JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
 }
 
 function saveHistory(data) {
-  fs.writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2));
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
 function ensureUser(data, member) {
@@ -134,13 +154,16 @@ async function updateLog(guild, member) {
   if (!user) return;
 
   const canal = await guild.channels.fetch(CANAL_LOGS).catch(() => null);
-  if (!canal) return;
+  if (!canal || !canal.isTextBased()) return;
 
   const content = "```" + buildLog(user) + "```";
 
   if (user.logMessageId) {
     const msg = await canal.messages.fetch(user.logMessageId).catch(() => null);
-    if (msg) return msg.edit(content);
+    if (msg) {
+      await msg.edit(content);
+      return;
+    }
   }
 
   const newMsg = await canal.send(content);
@@ -148,33 +171,46 @@ async function updateLog(guild, member) {
   saveHistory(data);
 }
 
+async function sendMsg(guild, channelId, msg) {
+  const ch = await guild.channels.fetch(channelId).catch(() => null);
+  if (ch && ch.isTextBased()) {
+    await ch.send(msg).catch(console.error);
+  }
+}
+
 // ==============================
 // ENTRADA
 // ==============================
 
 client.on(Events.GuildMemberAdd, async member => {
-  await member.roles.add(ROLE_RECECAO);
+  try {
+    await member.roles.add(ROLE_RECECAO).catch(console.error);
 
-  const canal = await member.guild.channels.fetch(CANAL_VERIFICACAO);
+    const canal = await member.guild.channels.fetch(CANAL_VERIFICACAO).catch(() => null);
+    if (canal && canal.isTextBased()) {
+      await canal.send({
+        content: `Bem-vindo ao Império Oculto ${member},\nAguarda pela atribuição dos cargos.`,
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId("civil").setLabel("Civil").setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId("trabalhador").setLabel("Trabalhador").setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId("org").setLabel("ORG").setStyle(ButtonStyle.Success)
+          )
+        ]
+      });
+    }
 
-  await canal.send({
-    content: `Bem-vindo ao Império Oculto ${member},\nAguarda pela atribuição dos cargos.`,
-    components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("civil").setLabel("Civil").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("trabalhador").setLabel("Trabalhador").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("org").setLabel("ORG").setStyle(ButtonStyle.Success)
-      )
-    ]
-  });
+    const data = loadHistory();
+    const user = ensureUser(data, member);
+    user.nome = member.user.username;
 
-  const data = loadHistory();
-  const user = ensureUser(data, member);
+    addRole(user, ROLE_RECECAO, MONITORED_ROLES[ROLE_RECECAO], nowISO());
 
-  addRole(user, ROLE_RECECAO, MONITORED_ROLES[ROLE_RECECAO], nowISO());
-
-  saveHistory(data);
-  updateLog(member.guild, member);
+    saveHistory(data);
+    await updateLog(member.guild, member);
+  } catch (err) {
+    console.error("Erro no GuildMemberAdd:", err);
+  }
 });
 
 // ==============================
@@ -190,16 +226,31 @@ client.on(Events.InteractionCreate, async interaction => {
     !actor.roles.cache.has(ROLE_CHEFE) &&
     !actor.roles.cache.has(ROLE_SUBCHEFE)
   ) {
-    return interaction.reply({ content: "Sem permissão", ephemeral: true });
+    return interaction.reply({
+      content: "Sem permissão",
+      ephemeral: true
+    });
   }
 
   const match = interaction.message.content.match(/<@!?(\d+)>/);
-  if (!match) return;
+  if (!match) {
+    return interaction.reply({
+      content: "Não consegui identificar o utilizador.",
+      ephemeral: true
+    });
+  }
 
-  const target = await interaction.guild.members.fetch(match[1]);
+  const target = await interaction.guild.members.fetch(match[1]).catch(() => null);
+  if (!target) {
+    return interaction.reply({
+      content: "O utilizador já não está no servidor.",
+      ephemeral: true
+    });
+  }
 
   const data = loadHistory();
   const user = ensureUser(data, target);
+  user.nome = target.user.username;
 
   const now = nowISO();
 
@@ -207,32 +258,47 @@ client.on(Events.InteractionCreate, async interaction => {
   closeRole(user, ROLE_RECECAO, now);
 
   if (interaction.customId === "civil") {
-    await target.roles.add(ROLE_CIVIL);
+    await target.roles.add(ROLE_CIVIL).catch(console.error);
     addRole(user, ROLE_CIVIL, "Civil", now);
-    sendMsg(interaction.guild, CANAL_BOAS_VINDAS_CIVIL, `Bem-vindo a área civil do Império Oculto ${target}.`);
+    await sendMsg(
+      interaction.guild,
+      CANAL_BOAS_VINDAS_CIVIL,
+      `Bem-vindo a área civil do Império Oculto ${target}.`
+    );
   }
 
   if (interaction.customId === "trabalhador") {
-    await target.roles.add(ROLE_TRABALHADOR);
+    await target.roles.add(ROLE_TRABALHADOR).catch(console.error);
     addRole(user, ROLE_TRABALHADOR, "Trabalhador", now);
-    sendMsg(interaction.guild, CANAL_BOAS_VINDAS_TRABALHADOR, `Bem-vindo a área dos trabalhadores do Império Oculto ${target}.`);
+    await sendMsg(
+      interaction.guild,
+      CANAL_BOAS_VINDAS_TRABALHADOR,
+      `Bem-vindo a área dos trabalhadores do Império Oculto ${target}.`
+    );
   }
 
   if (interaction.customId === "org") {
-    await target.roles.add(ROLE_IMPERIO);
-    await target.roles.add(ROLE_ASSOCIADOS);
+    await target.roles.add(ROLE_IMPERIO).catch(console.error);
+    await target.roles.add(ROLE_ASSOCIADOS).catch(console.error);
 
     addRole(user, ROLE_IMPERIO, "Imperio Oculto", now);
     addRole(user, ROLE_ASSOCIADOS, "Associados", now);
 
-    sendMsg(interaction.guild, CANAL_BOAS_VINDAS_MEMBRO, `Bem-vindo a área dos membros do Império Oculto ${target}.`);
+    await sendMsg(
+      interaction.guild,
+      CANAL_BOAS_VINDAS_MEMBRO,
+      `Bem-vindo a área dos membros do Império Oculto ${target}.`
+    );
   }
 
   saveHistory(data);
-  updateLog(interaction.guild, target);
+  await updateLog(interaction.guild, target);
 
   await interaction.message.delete().catch(() => {});
-  interaction.reply({ content: "Feito", ephemeral: true });
+  await interaction.reply({
+    content: "Feito",
+    ephemeral: true
+  });
 });
 
 // ==============================
@@ -240,27 +306,21 @@ client.on(Events.InteractionCreate, async interaction => {
 // ==============================
 
 client.on(Events.GuildMemberRemove, async member => {
-  const data = loadHistory();
-  const user = data[member.id];
-  if (!user) return;
+  try {
+    const data = loadHistory();
+    const user = data[member.id];
+    if (!user) return;
 
-  const now = nowISO();
+    const now = nowISO();
+    user.dataSaida = now;
+    closeAll(user, now);
 
-  user.dataSaida = now;
-  closeAll(user, now);
-
-  saveHistory(data);
-  updateLog(member.guild, member);
+    saveHistory(data);
+    await updateLog(member.guild, member);
+  } catch (err) {
+    console.error("Erro no GuildMemberRemove:", err);
+  }
 });
-
-// ==============================
-// FUNCAO AUX
-// ==============================
-
-async function sendMsg(guild, channelId, msg) {
-  const ch = await guild.channels.fetch(channelId).catch(() => null);
-  if (ch) ch.send(msg);
-}
 
 // ==============================
 // START
@@ -269,5 +329,10 @@ async function sendMsg(guild, channelId, msg) {
 client.once(Events.ClientReady, () => {
   console.log(`✅ Bot ligado como ${client.user.tag}`);
 });
+
+if (!TOKEN) {
+  console.error("❌ BOT_TOKEN não definido no Render.");
+  process.exit(1);
+}
 
 client.login(TOKEN);
